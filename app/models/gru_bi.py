@@ -9,6 +9,8 @@ from tqdm import tqdm
 
 from .base import BaseStockModel
 
+import torch.nn.utils as nn_utils
+
 class GRUNetwork(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, dropout: float):
         super(GRUNetwork, self).__init__()
@@ -114,7 +116,8 @@ class GRUPredictor(BaseStockModel):
             'learning_rate': 0.001,
             'epochs': 150,
             'batch_size': 32,
-            'num_models': 5
+            'num_models': 5,
+            'patience': 60,
         }
 
     def set_progress_callback(self, callback: Callable[[float, str], None]) -> None:
@@ -198,29 +201,27 @@ class GRUPredictor(BaseStockModel):
         # Validate input data
         if X_train is None or y_train is None or X_val is None or y_val is None:
             raise ValueError("Training data cannot be None")
-            
         if len(X_train) == 0 or len(y_train) == 0:
             raise ValueError("Empty training data provided")
-        
+
         # Convert to PyTorch tensors if they aren't already
         if not isinstance(X_train, torch.Tensor):
             X_train = torch.FloatTensor(X_train).to(self.device)
             y_train = torch.FloatTensor(y_train).to(self.device)
             X_val = torch.FloatTensor(X_val).to(self.device)
             y_val = torch.FloatTensor(y_val).to(self.device)
-        
+
         self.models = []
         model_results = []
-        
         total_epochs = self.config['epochs'] * self.config['num_models']
         current_epoch = 0
-        
+
         for m in range(self.config['num_models']):
             self.report_progress(
                 m / self.config['num_models'], 
                 f"Training model {m+1}/{self.config['num_models']}"
             )
-            
+
             input_dim = X_train.shape[2] if len(X_train.shape) == 3 else 1
             model = GRUNetwork(
                 input_dim=input_dim,
@@ -228,60 +229,99 @@ class GRUPredictor(BaseStockModel):
                 num_layers=self.config['num_layers'],
                 dropout=self.config['dropout']
             ).to(self.device)
-            
+
             optimizer = optim.Adam(model.parameters(), lr=self.config['learning_rate'])
+            # Initialize a step learning rate scheduler: reduces lr every 50 epochs by a factor of 0.5
+            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
             criterion = nn.MSELoss()
+
+            # Early stopping variables
+            best_val_loss = float('inf')
+            epochs_no_improve = 0
             
-            # Training loop with progress reporting
+            # Training loop with progress reporting, gradient clipping, and learning rate scheduling
             for epoch in range(self.config['epochs']):
                 current_epoch += 1
                 model.train()
                 train_losses = []
-                
-                # Update progress
-                progress = current_epoch / total_epochs
-                if epoch % 20 == 0 or epoch == self.config['epochs'] - 1:
-                    self.report_progress(
-                        progress, 
-                        f"Model {m+1} | Epoch {epoch+1}/{self.config['epochs']} | Loss: {np.mean(train_losses) if train_losses else 'N/A'}"
-                    )
-                
+
+                # Process training batches
                 for batch_x, batch_y in self.batch_generator(X_train, y_train, self.config['batch_size']):
                     optimizer.zero_grad()
                     output = model(batch_x)
                     loss = criterion(output.squeeze(), batch_y)
                     loss.backward()
+
+                    # Apply gradient clipping to stabilize training
+                    nn_utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                     optimizer.step()
                     train_losses.append(loss.item())
-            
-            # Evaluate model
+                
+                # Calculate average training loss
+                avg_train_loss = np.mean(train_losses)
+                
+                # Evaluate on validation set
+                model.eval()
+                with torch.no_grad():
+                    val_output = model(X_val)
+                    val_loss = criterion(val_output.squeeze(), y_val).item()
+                
+                # Step the scheduler at the end of each epoch
+                scheduler.step()
+                
+                # Report progress for each epoch
+                progress = (m * self.config['epochs'] + epoch + 1) / total_epochs
+                self.report_progress(
+                    progress, 
+                    f"Model {m+1}/{self.config['num_models']} | Epoch {epoch+1}/{self.config['epochs']} | "
+                    f"Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}"
+                )
+                
+                # Early stopping check (if patience is set)
+                if hasattr(self.config, 'patience') and self.config.get('patience', 0) > 0:
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        epochs_no_improve = 0
+                    else:
+                        epochs_no_improve += 1
+                        if epochs_no_improve >= self.config['patience']:
+                            self.report_progress(
+                                progress,
+                                f"Early stopping at epoch {epoch+1} for model {m+1}"
+                            )
+                            break
+                        
+            # Evaluate model on validation set
             model.eval()
             with torch.no_grad():
                 val_pred = model(X_val).cpu().numpy()
-            
+
             accuracy = self.calculate_accuracy(y_val.cpu().numpy(), val_pred)
             model_results.append({
                 'model': model,
                 'accuracy': accuracy,
-                'predictions': val_pred
+                'predictions': val_pred,
+                'val_loss': best_val_loss
             })
-            
             self.models.append(model)
-        
+
         self.report_progress(1.0, "Training completed")
-        
+
         # Sort models by accuracy and keep the best ones
         model_results.sort(key=lambda x: x['accuracy'], reverse=True)
         self.models = [result['model'] for result in model_results]
-        
+
         # Calculate ensemble metrics
         ensemble_predictions = self.predict(X_val.cpu().numpy(), 1)
         metrics = {
             'accuracy': self.calculate_accuracy(y_val.cpu().numpy(), ensemble_predictions),
-            'individual_accuracies': [result['accuracy'] for result in model_results]
+            'individual_accuracies': [result['accuracy'] for result in model_results],
+            'val_loss': model_results[0]['val_loss']  # Include validation loss in metrics
         }
-        
+        self.metrics = metrics
         return metrics
+
 
     def predict(self, input_data: np.ndarray, prediction_days: int) -> np.ndarray:
         """Make ensemble predictions with improved error handling"""
