@@ -1,8 +1,9 @@
 from typing import Dict, Type, List
 from .base import BaseStockModel
 from .gru_bi import GRUPredictor
+from .lstm_bi import LSTMPredictor
 
-# Model registry with metadata
+# Update the available_models dictionary
 available_models: Dict[str, Dict] = {
     "Bidirectional GRU": {
         "class": GRUPredictor,
@@ -10,6 +11,13 @@ available_models: Dict[str, Dict] = {
         "complexity": "Medium",
         "recommended_for": ["Short-term predictions", "Trend analysis"],
         "min_data_points": 100
+    },
+    "Bidirectional LSTM": {
+        "class": LSTMPredictor,
+        "description": "Uses bidirectional LSTM cells to capture stock price patterns with improved memory retention",
+        "complexity": "Medium-High",
+        "recommended_for": ["Short-term predictions", "Trend analysis", "Complex pattern recognition"],
+        "min_data_points": 120
     }
     # Future models will be added here
 }

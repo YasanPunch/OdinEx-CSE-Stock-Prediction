@@ -661,7 +661,67 @@ if st.session_state.error_message:
     st.markdown("---")
 
 # Sidebar
+# Import the data_manager module
+from utils.data_manager import (
+    check_data_freshness, 
+    run_scraper, 
+    run_transformer, 
+    get_data_stats
+)
+
 with st.sidebar:
+    st.markdown('<p style="color: #FFD700; font-size: 1.2em;">Data Management</p>', unsafe_allow_html=True)
+    with st.expander("Scrape and Transform", expanded=False):                
+        # Display data freshness info
+        freshness = check_data_freshness()
+        data_stats = get_data_stats()
+        
+        # Data status indicator
+        status_color = "#00FF00" if freshness["fresh"] else "#FFD700"
+        st.markdown(f"""
+            <div style='background-color: #232323; padding: 1em; border-radius: 10px; border: 1px solid {status_color};'>
+                <p><b>Last Update:</b> {freshness["last_update"]}</p>
+                <p><b>Data Range:</b> {data_stats["date_range"]["start"]} to {data_stats["date_range"]["end"]}</p>
+                <p><b>Companies:</b> {data_stats["processed_file_count"]}</p>
+                <p><b>Daily Files:</b> {data_stats["raw_file_count"]}</p>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        # Data update controls
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("Scrape Data", key="scrape_btn"):
+                with st.spinner("Scraping latest data..."):
+                    result = run_scraper(force=False)
+                    if result["success"]:
+                        st.success(result["message"])
+                    else:
+                        st.warning(result["message"])
+                        
+                        # Offer force option if appropriate
+                        if "after 7pm" in result["message"] or "already exists" in result["message"]:
+                            if st.button("Force Scrape Anyway", key="force_scrape"):
+                                with st.spinner("Force scraping data..."):
+                                    force_result = run_scraper(force=True)
+                                    if force_result["success"]:
+                                        st.success(force_result["message"])
+                                    else:
+                                        st.error(force_result["message"])
+        
+        with col2:
+            if st.button("Transform Data", key="transform_btn"):
+                with st.spinner("Transforming data..."):
+                    result = run_transformer()
+                    if result["success"]:
+                        st.success(result["message"])
+                        # Reload the app to refresh company list
+                        st.experimental_rerun()
+                    else:
+                        st.error(result["message"])
+    
+with st.sidebar:
+    st.markdown("---")                        
     st.markdown('<p style="color: #FFD700; font-size: 1.2em;">Model Configuration</p>', unsafe_allow_html=True)
     
     # Model Selection
