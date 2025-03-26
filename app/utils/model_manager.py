@@ -92,7 +92,7 @@ def get_cached_models(company):
 
 def load_cached_model(file_path):
     """
-    Load a model from cache
+    Load a model from cache with improved error handling for callback references
     
     Args:
         file_path: Path to the cached model file
@@ -101,9 +101,29 @@ def load_cached_model(file_path):
         Loaded model data or None if error
     """
     try:
+        # Define a custom unpickler to handle missing attributes
+        class CustomUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                # Handle the 'progress_callback' attribute
+                if name == 'progress_callback':
+                    return None
+                return super().find_class(module, name)
+        
         with open(file_path, 'rb') as f:
-            model_data = pickle.load(f)
+            unpickler = CustomUnpickler(f)
+            model_data = unpickler.load()
+            
+            # If the model has a 'model' key that has a 'progress_callback' attribute,
+            # set it to None to avoid reference errors
+            if 'model' in model_data and hasattr(model_data['model'], 'progress_callback'):
+                model_data['model'].progress_callback = None
+                
+            # If this is a dictionary with model_data, check that too
+            if 'model_data' in model_data and 'model' in model_data['model_data']:
+                if hasattr(model_data['model_data']['model'], 'progress_callback'):
+                    model_data['model_data']['model'].progress_callback = None
+                    
         return model_data
     except Exception as e:
-        logger.error(f"Error loading cached model: {str(e)}")
+        logging.error(f"Error loading cached model: {str(e)}")
         return None

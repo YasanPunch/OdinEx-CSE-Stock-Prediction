@@ -308,6 +308,7 @@ def get_or_train_model(model_type: str, company: str, parameters: Dict[str, Any]
         }
         
         # Create metadata for the model
+        # Create more detailed metadata for the model
         model_metadata = {
             'company': company,
             'model_type': model_type,
@@ -318,7 +319,14 @@ def get_or_train_model(model_type: str, company: str, parameters: Dict[str, Any]
             'training_time': training_time,
             'window_size': parameters.get('window_size', 'N/A'),
             'prediction_days': parameters.get('prediction_days', 7),
-            'description': f"{model_type} model for {company} with window {parameters.get('window_size')}"
+            'description': f"{model_type} model for {company} with window {parameters.get('window_size')}",
+            # Add more specific metadata
+            'metrics_summary': {
+                'mse': metrics.get('mse', 0),
+                'rmse': metrics.get('rmse', 0),
+                'mae': metrics.get('mae', 0),
+                'r_squared': metrics.get('r_squared', 0),
+            }
         }
         
         # Save to cache with metadata
@@ -326,8 +334,15 @@ def get_or_train_model(model_type: str, company: str, parameters: Dict[str, Any]
             # Ensure directory exists
             os.makedirs(os.path.dirname(str(cache_file)), exist_ok=True)
             
+            # Make a copy of the model data and clear callbacks
+            save_model_data = model_data.copy()
+            if 'model' in save_model_data and hasattr(save_model_data['model'], 'clear_progress_callback'):
+                save_model_data['model'] = save_model_data['model'].clear_progress_callback()
+            elif 'model' in save_model_data and hasattr(save_model_data['model'], 'progress_callback'):
+                save_model_data['model'].progress_callback = None
+            
             save_dict = {
-                'model_data': model_data,
+                'model_data': save_model_data,
                 'metadata': model_metadata
             }
             
@@ -349,7 +364,7 @@ def get_or_train_model(model_type: str, company: str, parameters: Dict[str, Any]
         return None
     
 def update_model_cache_index(metadata, cache_key):
-    """Update the index of cached models for easier retrieval"""
+    """Update the index of cached models with enhanced metadata"""
     index_file = CACHE_DIR / "model_index.json"
     
     # Load existing index if it exists
@@ -362,9 +377,26 @@ def update_model_cache_index(metadata, cache_key):
     else:
         index = {"models": []}
     
-    # Add the new model to the index
+    # Add the new model to the index with enhanced metadata
     entry = metadata.copy()
     entry['cache_key'] = cache_key
+    
+    # Add parameter summary for better identification
+    params = entry.get('parameters', {})
+    param_summary = {
+        'window_size': params.get('window_size', 'N/A'),
+        'hidden_dim': params.get('hidden_dim', 'N/A'),
+        'num_layers': params.get('num_layers', 'N/A'),
+        'dropout': params.get('dropout', 'N/A'),
+        'learning_rate': params.get('learning_rate', 'N/A'),
+        'prediction_days': params.get('prediction_days', 'N/A')
+    }
+    entry['param_summary'] = param_summary
+    
+    # Add a unique identifier combining date and parameters
+    creation_time = entry.get('creation_date', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    param_hash = hashlib.md5(f"{param_summary}".encode()).hexdigest()[:6]
+    entry['model_id'] = f"{creation_time.split(' ')[0]}-{param_hash}"
     
     # Check if this exact model already exists in the index
     for i, existing in enumerate(index["models"]):
@@ -376,12 +408,15 @@ def update_model_cache_index(metadata, cache_key):
         # Add as a new entry
         index["models"].append(entry)
     
+    # Sort models by creation date (most recent first)
+    index["models"].sort(key=lambda x: x.get('creation_date', ''), reverse=True)
+    
     # Save the updated index
     with open(index_file, 'w') as f:
         json.dump(index, f, indent=2)
         
 def get_cached_models_for_company(company):
-    """Get list of cached models for a specific company"""
+    """Get list of cached models for a specific company with enhanced metadata"""
     index_file = CACHE_DIR / "model_index.json"
     if not index_file.exists():
         return []
@@ -393,6 +428,23 @@ def get_cached_models_for_company(company):
                 model for model in index.get("models", [])
                 if model.get("company") == company
             ]
+            
+            # Enhance model entries with a descriptive name
+            for model in company_models:
+                params = model.get('parameters', {})
+                # Create a descriptive name that includes key parameters
+                window_size = params.get('window_size', 'N/A')
+                hidden_dim = params.get('hidden_dim', 'N/A')
+                num_layers = params.get('num_layers', 'N/A')
+                training_date = model.get('creation_date', '').split(' ')[0]
+                accuracy = model.get('accuracy', 0)
+                
+                model['display_name'] = (
+                    f"{model.get('model_type', 'Unknown')} "
+                    f"[W:{window_size},H:{hidden_dim},L:{num_layers}] "
+                    f"({training_date}) - {accuracy:.2f}%"
+                )
+            
             return company_models
         except json.JSONDecodeError:
             return []
@@ -881,10 +933,28 @@ with st.sidebar:
         if cached_models:
             st.sidebar.markdown("### Cached Models")
             
+            # Add model filtering options
+            filter_options = ["All", "Best Accuracy", "Recent Models", "Long Window", "Short Window"]
+            filter_type = st.sidebar.selectbox("Filter Models", filter_options, index=0)
+            
+            # Filter models based on selection
+            filtered_models = cached_models
+            if filter_type == "Best Accuracy":
+                filtered_models = sorted(cached_models, key=lambda x: x.get('accuracy', 0), reverse=True)[:10]
+            elif filter_type == "Recent Models":
+                filtered_models = cached_models[:10]  # Already sorted by date
+            elif filter_type == "Long Window":
+                filtered_models = sorted(cached_models, 
+                                        key=lambda x: x.get('param_summary', {}).get('window_size', 0), 
+                                        reverse=True)
+            elif filter_type == "Short Window":
+                filtered_models = sorted(cached_models, 
+                                        key=lambda x: x.get('param_summary', {}).get('window_size', 0))
+            
             # Create a user-friendly display name for each model
             model_options = {
-                f"{m['model_type']} ({m['creation_date'][:10]}) - Acc: {m['accuracy']:.2f}%": m
-                for m in sorted(cached_models, key=lambda x: x['creation_date'], reverse=True)
+                m.get('display_name', f"{m['model_type']} ({m['creation_date'][:10]}) - Acc: {m['accuracy']:.2f}%"): m
+                for m in filtered_models
             }
             
             selected_model_name = st.sidebar.selectbox(
@@ -896,34 +966,58 @@ with st.sidebar:
             if selected_model_name:
                 selected_model = model_options[selected_model_name]
                 
-                # Show model details
+                # Show model details with enhanced parameter information
                 with st.sidebar.expander("Model Details", expanded=False):
+                    st.markdown(f"**Model ID:** {selected_model.get('model_id', 'N/A')}")
                     st.markdown(f"**Model Type:** {selected_model['model_type']}")
                     st.markdown(f"**Created:** {selected_model['creation_date']}")
                     st.markdown(f"**Accuracy:** {selected_model['accuracy']:.2f}%")
-                    st.markdown(f"**Window Size:** {selected_model['parameters'].get('window_size', 'N/A')}")
                     
-                # Load button
-                if st.sidebar.button("Load Selected Model"):
-                    with st.spinner("Loading model..."):
-                        try:
-                            cache_key = selected_model['cache_key']
-                            cache_file = CACHE_DIR / f"{cache_key}.pkl"
-                            
-                            with open(cache_file, 'rb') as f:
-                                loaded_data = pickle.load(f)
+                    # Display parameter summary in a nice format
+                    st.markdown("**Parameters:**")
+                    param_summary = selected_model.get('param_summary', {})
+                    for param, value in param_summary.items():
+                        st.markdown(f"- {param}: {value}")
+                    
+                    # Additional metrics if available
+                    if 'direction_accuracy' in selected_model:
+                        st.markdown(f"**Direction Accuracy:** {selected_model['direction_accuracy']:.2f}%")
+                    if 'training_time' in selected_model:
+                        st.markdown(f"**Training Time:** {selected_model['training_time']:.2f}s")
+                        
+                    # Load button
+                    if st.sidebar.button("Load Selected Model"):
+                        with st.spinner("Loading model..."):
+                            try:
+                                cache_key = selected_model['cache_key']
+                                cache_file = CACHE_DIR / f"{cache_key}.pkl"
                                 
-                            # Check if this is a new format or old format
-                            if 'model_data' in loaded_data:
-                                model_data = loaded_data['model_data']
-                            else:
-                                model_data = loaded_data
+                                # Use the updated load_cached_model function
+                                loaded_data = load_cached_model(cache_file)
                                 
-                            st.session_state['current_model'] = model_data
-                            st.sidebar.success("Model loaded successfully!")
-                            st.experimental_rerun()
-                        except Exception as e:
-                            st.sidebar.error(f"Error loading model: {str(e)}")
+                                if loaded_data is None:
+                                    st.sidebar.error("Failed to load model")
+                                else:
+                                    # Check if this is a new format or old format
+                                    if 'model_data' in loaded_data:
+                                        model_data = loaded_data['model_data']
+                                        
+                                        # Set progress_callback to None if it exists
+                                        if 'model' in model_data and hasattr(model_data['model'], 'progress_callback'):
+                                            model_data['model'].progress_callback = None
+                                    else:
+                                        model_data = loaded_data
+                                        
+                                        # Set progress_callback to None if it exists
+                                        if 'model' in model_data and hasattr(model_data['model'], 'progress_callback'):
+                                            model_data['model'].progress_callback = None
+                                    
+                                    st.session_state['current_model'] = model_data
+                                    st.sidebar.success("Model loaded successfully!")
+                                    st.experimental_rerun()
+                            except Exception as e:
+                                st.sidebar.error(f"Error loading model: {str(e)}")
+                                logging.error(f"Model loading error: {str(e)}", exc_info=True)
 
     # Dynamic parameter inputs
     st.markdown("### Model Parameters")
@@ -1082,18 +1176,6 @@ with st.sidebar:
     # Update parameters in session state
     st.session_state.current_params = current_params
     
-    # Cache Management
-    with st.expander("Cache Management", expanded=False):
-        st.markdown("### Cached Models")
-        cached_models = list(CACHE_DIR.glob("*.pkl"))
-        st.write(f"Currently cached: {len(cached_models)} models")
-        
-        if st.button("Clear All Cached Models"):
-            for file in CACHE_DIR.glob("*.pkl"):
-                file.unlink()
-            st.cache_resource.clear()
-            st.success("Cache cleared!")
-    
     # Create a placeholder for training progress
     if 'train_progress_placeholder' not in st.session_state:
         st.session_state.train_progress_placeholder = st.empty()
@@ -1173,7 +1255,7 @@ with st.sidebar:
             st.info("No training history available")
 
 # Main Content Tabs
-tabs = st.tabs(["Prediction", "Model Comparison", "Technical Analysis", "Data Explorer"])
+tabs = st.tabs(["Prediction", "Model Comparison", "Technical Analysis", "Data Explorer", "Model History"])
 
 # Prediction Tab
 with tabs[0]:
@@ -1422,19 +1504,41 @@ with tabs[0]:
             try:
                 info_cols = st.columns(2)
                 
+                # In the Prediction tab where model info is displayed:
                 with info_cols[0]:
-                    st.markdown("""
+                    model_metadata = model_data.get('metadata', {})
+                    model_id = model_metadata.get('model_id', 'N/A')
+                    custom_name = model_metadata.get('custom_name', '')
+                    
+                    # Display header with model name/ID
+                    st.markdown(f"""
                         <div style='background-color: #232323; padding: 1em; border-radius: 10px; border: 1px solid #3a3a3a;'>
-                            <h4 style='color: #FFD700;'>Training Parameters</h4>
+                            <h4 style='color: #FFD700;'>Model Information</h4>
+                            <p><b>ID:</b> {model_id}</p>
+                            {f"<p><b>Name:</b> {custom_name}</p>" if custom_name else ""}
                         </div>
                     """, unsafe_allow_html=True)
                     
-                    params_table = pd.DataFrame([{
-                        'Parameter': key,
-                        'Value': value
-                    } for key, value in model_data['parameters'].items()])
+                    # Display parameters in a cleaner format
+                    st.markdown("##### Parameters")
                     
-                    st.dataframe(params_table, use_container_width=True, hide_index=True)
+                    param_cols = st.columns(2)
+                    
+                    params = model_data['parameters']
+                    key_params = {
+                        'window_size': 'Window Size',
+                        'hidden_dim': 'Hidden Dimensions',
+                        'num_layers': 'Number of Layers',
+                        'dropout': 'Dropout Rate',
+                        'learning_rate': 'Learning Rate',
+                        'prediction_days': 'Prediction Days'
+                    }
+                    
+                    for i, (param, label) in enumerate(key_params.items()):
+                        col_idx = i % 2
+                        with param_cols[col_idx]:
+                            if param in params:
+                                st.metric(label, params[param])
                     
                     # Training timestamp
                     training_date = model_data.get('training_date', datetime.now())
@@ -3047,6 +3151,438 @@ with tabs[3]:
             logger.error(f"Error in data explorer: {str(e)}")
             st.error(f"Error exploring data: {str(e)}")
 
+with tabs[4]:
+    st.session_state.active_tab = "Models"
+    
+    st.markdown("## Model Management")
+    
+    # Check if company is selected
+    company = st.session_state.selected_company
+    if not company:
+        st.warning("Please select a company first")
+    else:
+        try:
+            # Get all cached models for the company
+            all_cached_models = get_cached_models_for_company(company)
+            
+            if not all_cached_models:
+                st.info(f"No cached models found for {company}. Train a model first.")
+            else:
+                st.markdown(f"### Available Models for {company}")
+                
+                # Create tabs for different views
+                model_view_tabs = st.tabs(["Table View", "Comparison", "Management"])
+                
+                with model_view_tabs[0]:
+                    # Create a dataframe for all models
+                    model_rows = []
+                    for model in all_cached_models:
+                        param_summary = model.get('param_summary', {})
+                        model_rows.append({
+                            'Model ID': model.get('model_id', 'N/A'),
+                            'Type': model.get('model_type', 'Unknown'),
+                            'Created': model.get('creation_date', ''),
+                            'Window': param_summary.get('window_size', 'N/A'),
+                            'Hidden Dim': param_summary.get('hidden_dim', 'N/A'),
+                            'Layers': param_summary.get('num_layers', 'N/A'),
+                            'Dropout': param_summary.get('dropout', 'N/A'),
+                            'Learning Rate': param_summary.get('learning_rate', 'N/A'),
+                            'Accuracy (%)': model.get('accuracy', 0),
+                            'Direction Acc (%)': model.get('direction_accuracy', 0),
+                        })
+                    
+                    model_df = pd.DataFrame(model_rows)
+                    st.dataframe(model_df, use_container_width=True)
+                    
+                    # Add download option
+                    csv = model_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Download Model Catalog",
+                        data=csv,
+                        file_name=f"{company}_models_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+                
+                with model_view_tabs[1]:
+                    st.markdown("### Model Parameter Comparison")
+                    
+                    # Get parameters to compare
+                    param_options = ['window_size', 'hidden_dim', 'num_layers', 'dropout', 'learning_rate']
+                    param_labels = {
+                        'window_size': 'Window Size', 
+                        'hidden_dim': 'Hidden Dimensions',
+                        'num_layers': 'Number of Layers',
+                        'dropout': 'Dropout Rate',
+                        'learning_rate': 'Learning Rate'
+                    }
+                    
+                    selected_params = st.multiselect(
+                        "Select Parameters to Compare",
+                        options=param_options,
+                        default=['window_size', 'hidden_dim'],
+                        format_func=lambda x: param_labels.get(x, x)
+                    )
+                    
+                    if selected_params:
+                        # Create comparison visualization
+                        fig = go.Figure()
+                        
+                        # Prepare data for selected parameters
+                        for param in selected_params:
+                            param_values = []
+                            accuracies = []
+                            model_names = []
+                            
+                            for model in all_cached_models:
+                                param_summary = model.get('param_summary', {})
+                                if param in param_summary:
+                                    try:
+                                        param_val = float(param_summary[param])
+                                        param_values.append(param_val)
+                                        accuracies.append(model.get('accuracy', 0))
+                                        model_names.append(model.get('model_id', 'Unknown'))
+                                    except (ValueError, TypeError):
+                                        # Skip non-numeric values
+                                        pass
+                            
+                            if param_values:
+                                fig.add_trace(go.Scatter(
+                                    x=param_values,
+                                    y=accuracies,
+                                    mode='markers',
+                                    name=param_labels.get(param, param),
+                                    marker=dict(
+                                        size=10,
+                                        opacity=0.7,
+                                        line=dict(width=2)
+                                    ),
+                                    text=model_names,
+                                    hovertemplate=(
+                                        f"{param_labels.get(param, param)}: %{{x}}<br>"
+                                        "Accuracy: %{y:.2f}%<br>"
+                                        "Model: %{text}<extra></extra>"
+                                    )
+                                ))
+                        
+                        # Update layout
+                        fig.update_layout(
+                            template='plotly_dark',
+                            plot_bgcolor='#1a1a1a',
+                            paper_bgcolor='#1a1a1a',
+                            title=dict(
+                                text=f'Parameter vs. Accuracy Comparison for {company}',
+                                font=dict(size=20, color='#FFD700'),
+                                x=0.5,
+                                xanchor='center'
+                            ),
+                            font=dict(color='#FFFFFF'),
+                            legend=dict(
+                                bgcolor='rgba(0,0,0,0)',
+                                bordercolor='#FFD700'
+                            ),
+                            xaxis=dict(
+                                gridcolor='#333333',
+                                title='Parameter Value',
+                                title_font=dict(color='#FFD700'),
+                                tickfont=dict(color='#FFFFFF')
+                            ),
+                            yaxis=dict(
+                                gridcolor='#333333',
+                                title='Accuracy (%)',
+                                title_font=dict(color='#FFD700'),
+                                tickfont=dict(color='#FFFFFF')
+                            ),
+                            hovermode='closest'
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                with model_view_tabs[2]:
+                    st.markdown("### Model Management")
+                    
+                    # Add model cleanup options
+                    st.markdown("#### Model Cleanup")
+                    
+                    # Options to delete models
+                    delete_options = [
+                        "Select option", 
+                        "Delete selected model", 
+                        "Delete all models for this company", 
+                        "Delete low-performance models",
+                        "Delete duplicates with same parameters"
+                    ]
+                    
+                    delete_action = st.selectbox("Select cleanup action", delete_options)
+                    
+                    if delete_action == "Delete selected model":
+                        # Model selection for deletion
+                        model_to_delete = st.selectbox(
+                            "Select model to delete",
+                            options=[m.get('display_name', f"{m['model_id']}") for m in all_cached_models],
+                            format_func=lambda x: x
+                        )
+                        
+                        if st.button("Delete Selected Model"):
+                            # Find the model key
+                            selected_model = next((m for m in all_cached_models 
+                                                if m.get('display_name', f"{m['model_id']}") == model_to_delete), None)
+                            
+                            if selected_model:
+                                cache_key = selected_model.get('cache_key')
+                                cache_file = CACHE_DIR / f"{cache_key}.pkl"
+                                
+                                # Delete the file
+                                if cache_file.exists():
+                                    cache_file.unlink()
+                                
+                                # Update the index file
+                                index_file = CACHE_DIR / "model_index.json"
+                                if index_file.exists():
+                                    with open(index_file, 'r') as f:
+                                        index = json.load(f)
+                                        
+                                    # Remove the model from the index
+                                    index["models"] = [m for m in index["models"] 
+                                                    if m.get('cache_key') != cache_key]
+                                    
+                                    with open(index_file, 'w') as f:
+                                        json.dump(index, f, indent=2)
+                                
+                                st.success(f"Successfully deleted model: {model_to_delete}")
+                                time.sleep(1)
+                                st.rerun()
+                                
+                    elif delete_action == "Delete all models for this company":
+                        st.warning(f"This will delete ALL cached models for {company}.")
+                        
+                        confirm = st.checkbox("I understand this cannot be undone")
+                        
+                        if confirm and st.button("Delete All Company Models"):
+                            # Get list of cache keys for this company
+                            cache_keys = [m.get('cache_key') for m in all_cached_models]
+                            
+                            # Delete all model files
+                            deleted_count = 0
+                            for cache_key in cache_keys:
+                                cache_file = CACHE_DIR / f"{cache_key}.pkl"
+                                if cache_file.exists():
+                                    cache_file.unlink()
+                                    deleted_count += 1
+                            
+                            # Update the index file
+                            index_file = CACHE_DIR / "model_index.json"
+                            if index_file.exists():
+                                with open(index_file, 'r') as f:
+                                    index = json.load(f)
+                                    
+                                # Remove all models for this company
+                                index["models"] = [m for m in index["models"] 
+                                                if m.get('company') != company]
+                                
+                                with open(index_file, 'w') as f:
+                                    json.dump(index, f, indent=2)
+                            
+                            st.success(f"Successfully deleted {deleted_count} models for {company}")
+                            time.sleep(1)
+                            st.rerun()
+                            
+                    elif delete_action == "Delete low-performance models":
+                        # Accuracy threshold for deletion
+                        threshold = st.slider(
+                            "Delete models with accuracy below",
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=70.0,
+                            step=5.0
+                        )
+                        
+                        # Count models below threshold
+                        low_performing = [m for m in all_cached_models if m.get('accuracy', 0) < threshold]
+                        
+                        if low_performing:
+                            st.warning(f"This will delete {len(low_performing)} models with accuracy below {threshold}%.")
+                            
+                            if st.button("Delete Low-Performance Models"):
+                                # Get cache keys for low-performing models
+                                cache_keys = [m.get('cache_key') for m in low_performing]
+                                
+                                # Delete model files
+                                deleted_count = 0
+                                for cache_key in cache_keys:
+                                    cache_file = CACHE_DIR / f"{cache_key}.pkl"
+                                    if cache_file.exists():
+                                        cache_file.unlink()
+                                        deleted_count += 1
+                                
+                                # Update the index file
+                                index_file = CACHE_DIR / "model_index.json"
+                                if index_file.exists():
+                                    with open(index_file, 'r') as f:
+                                        index = json.load(f)
+                                        
+                                    # Remove low-performing models
+                                    index["models"] = [m for m in index["models"] 
+                                                    if m.get('company') != company or m.get('accuracy', 0) >= threshold]
+                                    
+                                    with open(index_file, 'w') as f:
+                                        json.dump(index, f, indent=2)
+                                
+                                st.success(f"Successfully deleted {deleted_count} low-performance models")
+                                time.sleep(1)
+                                st.rerun()
+                        else:
+                            st.info(f"No models found with accuracy below {threshold}%")
+                            
+                    elif delete_action == "Delete duplicates with same parameters":
+                        st.info("This will keep only the best performing model for each unique parameter combination.")
+                        
+                        if st.button("Delete Duplicate Models"):
+                            # Group models by parameter combinations
+                            param_groups = {}
+                            
+                            for model in all_cached_models:
+                                # Create a parameter signature
+                                param_summary = model.get('param_summary', {})
+                                param_sig = json.dumps({k: v for k, v in sorted(param_summary.items())})
+                                
+                                if param_sig not in param_groups:
+                                    param_groups[param_sig] = []
+                                    
+                                param_groups[param_sig].append(model)
+                            
+                            # Find duplicates (groups with more than 1 model)
+                            duplicates_to_delete = []
+                            
+                            for param_sig, models in param_groups.items():
+                                if len(models) > 1:
+                                    # Sort by accuracy (descending)
+                                    sorted_models = sorted(models, key=lambda m: m.get('accuracy', 0), reverse=True)
+                                    # Keep the best one, delete the rest
+                                    duplicates_to_delete.extend(sorted_models[1:])
+                            
+                            if duplicates_to_delete:
+                                # Get cache keys for duplicates
+                                cache_keys = [m.get('cache_key') for m in duplicates_to_delete]
+                                
+                                # Delete duplicate files
+                                deleted_count = 0
+                                for cache_key in cache_keys:
+                                    cache_file = CACHE_DIR / f"{cache_key}.pkl"
+                                    if cache_file.exists():
+                                        cache_file.unlink()
+                                        deleted_count += 1
+                                
+                                # Update the index file
+                                index_file = CACHE_DIR / "model_index.json"
+                                if index_file.exists():
+                                    with open(index_file, 'r') as f:
+                                        index = json.load(f)
+                                        
+                                    # Remove duplicates
+                                    duplicate_keys = set(cache_keys)
+                                    index["models"] = [m for m in index["models"] 
+                                                    if m.get('cache_key') not in duplicate_keys]
+                                    
+                                    with open(index_file, 'w') as f:
+                                        json.dump(index, f, indent=2)
+                                
+                                st.success(f"Successfully deleted {deleted_count} duplicate models")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.info("No duplicate models found with identical parameters")
+                                
+                    # Model export/import section
+                    st.markdown("#### Model Export/Import")
+                    
+                    export_cols = st.columns(2)
+                    with export_cols[0]:
+                        if st.button("Export Model Catalog"):
+                            # Create a detailed catalog of all models
+                            catalog = {
+                                "company": company,
+                                "export_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                "models": all_cached_models
+                            }
+                            
+                            # Convert to JSON
+                            json_catalog = json.dumps(catalog, indent=2)
+                            
+                            # Provide download
+                            st.download_button(
+                                label="Download Catalog JSON",
+                                data=json_catalog,
+                                file_name=f"{company}_model_catalog_{datetime.now().strftime('%Y%m%d')}.json",
+                                mime="application/json"
+                            )
+                    
+                    with export_cols[1]:
+                        # Model import functionality
+                        uploaded_catalog = st.file_uploader("Import Model Catalog", type="json")
+                        
+                        if uploaded_catalog is not None:
+                            try:
+                                imported_catalog = json.load(uploaded_catalog)
+                                imported_company = imported_catalog.get("company", "Unknown")
+                                imported_models = imported_catalog.get("models", [])
+                                
+                                st.info(f"Found catalog for company: {imported_company} with {len(imported_models)} models")
+                                
+                                if st.button("Import Models"):
+                                    st.info("Model import functionality would be implemented here")
+                                    # Note: Actual implementation would require model file transfers
+                                    # This would typically involve server-side code
+                            except Exception as e:
+                                st.error(f"Error parsing catalog: {str(e)}")
+
+                    # Model rename section
+                    st.markdown("#### Rename Model")
+                    
+                    # Model selection for renaming
+                    rename_model = st.selectbox(
+                        "Select model to rename",
+                        options=[m.get('display_name', f"{m['model_id']}") for m in all_cached_models],
+                        format_func=lambda x: x,
+                        key="rename_select"
+                    )
+                    
+                    # Custom name input
+                    custom_name = st.text_input(
+                        "Enter custom name",
+                        value=""
+                    )
+                    
+                    if st.button("Update Model Name") and custom_name:
+                        # Find the model to rename
+                        selected_model = next((m for m in all_cached_models 
+                                            if m.get('display_name', f"{m['model_id']}") == rename_model), None)
+                        
+                        if selected_model:
+                            cache_key = selected_model.get('cache_key')
+                            
+                            # Update the index file
+                            index_file = CACHE_DIR / "model_index.json"
+                            if index_file.exists():
+                                with open(index_file, 'r') as f:
+                                    index = json.load(f)
+                                    
+                                # Find and update the model
+                                for model in index["models"]:
+                                    if model.get('cache_key') == cache_key:
+                                        model['custom_name'] = custom_name
+                                        break
+                                
+                                with open(index_file, 'w') as f:
+                                    json.dump(index, f, indent=2)
+                            
+                            st.success(f"Successfully renamed model to: {custom_name}")
+                            time.sleep(1)
+                            st.rerun()
+                           
+        except Exception as e:
+            logger.error(f"Error in data explorer: {str(e)}")
+            st.error(f"Error exploring data: {str(e)}")                         
+                    
 # Risk Disclaimer with close button
 if st.session_state.show_disclaimer:
     disclaimer_container = st.container()

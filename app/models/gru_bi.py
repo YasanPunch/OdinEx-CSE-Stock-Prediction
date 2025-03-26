@@ -447,3 +447,8 @@ class GRUPredictor(BaseStockModel):
             
         except Exception as e:
             raise IOError(f"Error loading model: {str(e)}")
+        
+    def clear_progress_callback(self):
+            """Clear the progress callback to avoid serialization issues"""
+            self.progress_callback = None
+            return self
