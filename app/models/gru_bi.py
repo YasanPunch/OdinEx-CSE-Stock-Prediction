@@ -117,7 +117,7 @@ class GRUPredictor(BaseStockModel):
             'epochs': 150,
             'batch_size': 32,
             'num_models': 5,
-            'patience': 60,
+            'patience': 30,
         }
 
     def set_progress_callback(self, callback: Callable[[float, str], None]) -> None:

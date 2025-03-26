@@ -1,3 +1,4 @@
+import json
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,6 +13,7 @@ import os
 from scipy import stats
 from plotly.subplots import make_subplots
 from typing import Dict, Any, List, Optional
+from utils.model_manager import get_cached_models, load_cached_model
 
 # Set page config
 st.set_page_config(
@@ -204,7 +206,6 @@ def get_model_cache_key(model_type: str, company: str, parameters: Dict[str, Any
         # Fallback to a simple key based on time
         return f"fallback_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-# Function to train a model (without caching decorator)
 def get_or_train_model(model_type: str, company: str, parameters: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Get cached model or train a new one with better error handling and logging"""
     start_time = time.time()
@@ -216,7 +217,14 @@ def get_or_train_model(model_type: str, company: str, parameters: Dict[str, Any]
         if cache_file.exists():
             try:
                 with open(cache_file, 'rb') as f:
-                    model_data = pickle.load(f)
+                    cached_data = pickle.load(f)
+                    
+                # Check if this is the new format (with metadata) or old format
+                if isinstance(cached_data, dict) and 'model_data' in cached_data:
+                    model_data = cached_data['model_data']
+                else:
+                    model_data = cached_data
+                    
                 st.success("Loaded model from cache!")
                 return model_data
             except Exception as e:
@@ -299,14 +307,37 @@ def get_or_train_model(model_type: str, company: str, parameters: Dict[str, Any]
             'training_time': training_time
         }
         
-        # Save to cache
+        # Create metadata for the model
+        model_metadata = {
+            'company': company,
+            'model_type': model_type,
+            'parameters': {k: v for k, v in parameters.items() if not callable(v)},  # Filter out callable objects
+            'creation_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'accuracy': metrics.get('accuracy', 0),
+            'direction_accuracy': metrics.get('direction_accuracy', 0),
+            'training_time': training_time,
+            'window_size': parameters.get('window_size', 'N/A'),
+            'prediction_days': parameters.get('prediction_days', 7),
+            'description': f"{model_type} model for {company} with window {parameters.get('window_size')}"
+        }
+        
+        # Save to cache with metadata
         try:
             # Ensure directory exists
             os.makedirs(os.path.dirname(str(cache_file)), exist_ok=True)
             
+            save_dict = {
+                'model_data': model_data,
+                'metadata': model_metadata
+            }
+            
             with open(cache_file, 'wb') as f:
-                pickle.dump(model_data, f)
+                pickle.dump(save_dict, f)
             logger.info(f"Model saved to cache: {cache_file}")
+            
+            # Update the model index
+            update_model_cache_index(model_metadata, cache_key)
+            
         except Exception as e:
             logger.error(f"Error saving model to cache: {str(e)}")
             
@@ -316,6 +347,55 @@ def get_or_train_model(model_type: str, company: str, parameters: Dict[str, Any]
         logger.error(f"Error during model training: {str(e)}")
         st.error(f"Error during model training: {str(e)}")
         return None
+    
+def update_model_cache_index(metadata, cache_key):
+    """Update the index of cached models for easier retrieval"""
+    index_file = CACHE_DIR / "model_index.json"
+    
+    # Load existing index if it exists
+    if index_file.exists():
+        with open(index_file, 'r') as f:
+            try:
+                index = json.load(f)
+            except json.JSONDecodeError:
+                index = {"models": []}
+    else:
+        index = {"models": []}
+    
+    # Add the new model to the index
+    entry = metadata.copy()
+    entry['cache_key'] = cache_key
+    
+    # Check if this exact model already exists in the index
+    for i, existing in enumerate(index["models"]):
+        if existing.get('cache_key') == cache_key:
+            # Update the existing entry
+            index["models"][i] = entry
+            break
+    else:
+        # Add as a new entry
+        index["models"].append(entry)
+    
+    # Save the updated index
+    with open(index_file, 'w') as f:
+        json.dump(index, f, indent=2)
+        
+def get_cached_models_for_company(company):
+    """Get list of cached models for a specific company"""
+    index_file = CACHE_DIR / "model_index.json"
+    if not index_file.exists():
+        return []
+    
+    with open(index_file, 'r') as f:
+        try:
+            index = json.load(f)
+            company_models = [
+                model for model in index.get("models", [])
+                if model.get("company") == company
+            ]
+            return company_models
+        except json.JSONDecodeError:
+            return []
 
 # Function to render model comparison visualization
 def render_model_comparison(comparison_models: List[Dict[str, Any]], company: str):
@@ -794,6 +874,56 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error loading company data: {str(e)}")
             company = None
+            
+    # In the app's sidebar, after company selection:
+    if company:
+        cached_models = get_cached_models_for_company(company)
+        if cached_models:
+            st.sidebar.markdown("### Cached Models")
+            
+            # Create a user-friendly display name for each model
+            model_options = {
+                f"{m['model_type']} ({m['creation_date'][:10]}) - Acc: {m['accuracy']:.2f}%": m
+                for m in sorted(cached_models, key=lambda x: x['creation_date'], reverse=True)
+            }
+            
+            selected_model_name = st.sidebar.selectbox(
+                "Select a pre-trained model",
+                options=list(model_options.keys()),
+                help="Choose a previously trained model to use without retraining"
+            )
+            
+            if selected_model_name:
+                selected_model = model_options[selected_model_name]
+                
+                # Show model details
+                with st.sidebar.expander("Model Details", expanded=False):
+                    st.markdown(f"**Model Type:** {selected_model['model_type']}")
+                    st.markdown(f"**Created:** {selected_model['creation_date']}")
+                    st.markdown(f"**Accuracy:** {selected_model['accuracy']:.2f}%")
+                    st.markdown(f"**Window Size:** {selected_model['parameters'].get('window_size', 'N/A')}")
+                    
+                # Load button
+                if st.sidebar.button("Load Selected Model"):
+                    with st.spinner("Loading model..."):
+                        try:
+                            cache_key = selected_model['cache_key']
+                            cache_file = CACHE_DIR / f"{cache_key}.pkl"
+                            
+                            with open(cache_file, 'rb') as f:
+                                loaded_data = pickle.load(f)
+                                
+                            # Check if this is a new format or old format
+                            if 'model_data' in loaded_data:
+                                model_data = loaded_data['model_data']
+                            else:
+                                model_data = loaded_data
+                                
+                            st.session_state['current_model'] = model_data
+                            st.sidebar.success("Model loaded successfully!")
+                            st.experimental_rerun()
+                        except Exception as e:
+                            st.sidebar.error(f"Error loading model: {str(e)}")
 
     # Dynamic parameter inputs
     st.markdown("### Model Parameters")
