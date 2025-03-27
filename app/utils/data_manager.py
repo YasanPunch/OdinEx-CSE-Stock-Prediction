@@ -22,7 +22,7 @@ logger = logging.getLogger('DataManager')
 BASE_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RAW_DATA_DIR = BASE_DIR / "data" / "raw_data"
 PROCESSED_DATA_DIR = BASE_DIR / "data" / "processed_data"
-SCRAPER_SCRIPT = BASE_DIR / "utils" / "myScraper.py"
+SCRAPER_SCRIPT = BASE_DIR / "utils" / "data_scraper.py"
 TRANSFORM_SCRIPT = BASE_DIR / "utils" / "transform.py"
 
 # Ensure directories exist

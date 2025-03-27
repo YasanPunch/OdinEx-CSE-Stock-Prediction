@@ -1176,14 +1176,6 @@ with st.sidebar:
     # Update parameters in session state
     st.session_state.current_params = current_params
     
-    # Create a placeholder for training progress
-    if 'train_progress_placeholder' not in st.session_state:
-        st.session_state.train_progress_placeholder = st.empty()
-    
-    # Create a placeholder for current epoch display
-    if 'epoch_placeholder' not in st.session_state:
-        st.session_state.epoch_placeholder = st.empty()
-    
     # Training Button
     if st.button("Train Model"):
         if not companies:
@@ -1193,6 +1185,9 @@ with st.sidebar:
         else:
             # Simplified training progress with expandable section
             st.markdown("### Training Progress")
+            
+            st.session_state.train_progress_placeholder = st.empty()
+            st.session_state.epoch_placeholder = st.empty()
             
             # Initialize progress bar
             progress_bar = st.session_state.train_progress_placeholder.progress(0.0)
@@ -1217,28 +1212,28 @@ with st.sidebar:
                 # Store the model instance in session state for get_or_train_model to use
                 st.session_state.model_instance = model_instance
                 
-                # Start training
-                model_data = get_or_train_model(model_type, company, current_params)
-                if model_data:
-                    st.session_state['current_model'] = model_data
-                    st.session_state.last_trained = datetime.now()
-                    
-                    # Add to training history
-                    history_entry = {
-                        'timestamp': datetime.now(),
-                        'model_type': model_type,
-                        'company': company,
-                        'metrics': model_data.get('metrics', {})
-                    }
-                    st.session_state.training_history.append(history_entry)
-                    
-                    # Show success message and update progress to 100%
-                    progress_bar.progress(1.0)
-                    epoch_status.success("Training completed successfully!")
-                    
-                    # Wait briefly to show completion before rerunning
-                    time.sleep(1)
-                    st.rerun()
+            # Start training
+            model_data = get_or_train_model(model_type, company, current_params)
+            if model_data:
+                st.session_state['current_model'] = model_data
+                st.session_state.last_trained = datetime.now()
+                
+                # Add to training history
+                history_entry = {
+                    'timestamp': datetime.now(),
+                    'model_type': model_type,
+                    'company': company,
+                    'metrics': model_data.get('metrics', {})
+                }
+                st.session_state.training_history.append(history_entry)
+                
+                # Show success message and update progress to 100%
+                progress_bar.progress(1.0)
+                epoch_status.success("Training completed successfully!")
+                
+                # Wait briefly to show completion before rerunning
+                time.sleep(1)
+                st.rerun()
 
     # Training history expander
     with st.expander("Training History", expanded=False):
@@ -1255,10 +1250,10 @@ with st.sidebar:
             st.info("No training history available")
 
 # Main Content Tabs
-tabs = st.tabs(["Prediction", "Model Comparison", "Technical Analysis", "Data Explorer", "Model History"])
+tabs = st.tabs(["Data Explorer", "Technical Analysis", "Prediction", "Model Comparison", "Model History"])
 
 # Prediction Tab
-with tabs[0]:
+with tabs[2]:
     st.session_state.active_tab = "Prediction"
     
     if 'current_model' in st.session_state:
@@ -1361,13 +1356,17 @@ with tabs[0]:
                         
                         metrics_cols = st.columns(4)
                         with metrics_cols[0]:
-                            st.metric("Accuracy", f"{metrics['accuracy']:.2f}%")
+                            st.metric("Accuracy", f"{metrics['accuracy']:.2f}%", 
+                                    help="Percentage of predictions within an acceptable margin of error from actual values")
                         with metrics_cols[1]:
-                            st.metric("Direction Accuracy", f"{metrics.get('direction_accuracy', 0):.2f}%")
+                            st.metric("Direction Accuracy", f"{metrics.get('direction_accuracy', 0):.2f}%", 
+                                    help="Percentage of correctly predicted price movement directions (up/down)")
                         with metrics_cols[2]:
-                            st.metric("RMSE", f"LKR {metrics['rmse']:.2f}")
+                            st.metric("RMSE", f"LKR {metrics['rmse']:.2f}", 
+                                    help="Root Mean Square Error - measures the average magnitude of prediction errors")
                         with metrics_cols[3]:
-                            st.metric("R²", f"{metrics.get('r_squared', 0):.3f}")
+                            st.metric("R²", f"{metrics.get('r_squared', 0):.3f}", 
+                                    help="Coefficient of determination - indicates how well the model fits the data (1.0 is perfect)")
                     
                 except Exception as e:
                     logger.error(f"Error displaying historical performance: {str(e)}")
@@ -1584,7 +1583,7 @@ with tabs[0]:
         st.info("No trained model available. Please train a model first.")
 
 # Model Comparison Tab
-with tabs[1]:
+with tabs[3]:
     st.session_state.active_tab = "Model Comparison"
     
     st.markdown("## Model Comparison")
@@ -1617,7 +1616,7 @@ with tabs[1]:
         st.info("Add models to comparison from the Prediction tab")
 
 # Technical Analysis Tab
-with tabs[2]:
+with tabs[1]:
     st.session_state.active_tab = "Technical Analysis"
     
     st.markdown("## Technical Analysis")
@@ -2561,7 +2560,7 @@ with tabs[2]:
             st.error(f"Error generating technical analysis: {str(e)}")
 
 # Data Explorer Tab
-with tabs[3]:
+with tabs[0]:
     st.session_state.active_tab = "Data Explorer"
     
     st.markdown("## Data Explorer")
@@ -3151,8 +3150,9 @@ with tabs[3]:
             logger.error(f"Error in data explorer: {str(e)}")
             st.error(f"Error exploring data: {str(e)}")
 
+# Model History and Management
 with tabs[4]:
-    st.session_state.active_tab = "Models"
+    st.session_state.active_tab = "Model History"
     
     st.markdown("## Model Management")
     
